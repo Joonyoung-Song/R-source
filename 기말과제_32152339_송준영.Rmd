@@ -1,0 +1,539 @@
+---
+title: "빅데이터처리개론 기말과제"
+author: "32152339 송준영"
+date: "2020. 12. 15."
+output:
+  html_document:
+    css: bootstrap.css
+  pdf_document: default
+---
+
+```{r, include=FALSE}
+# setting default options
+knitr::opts_chunk$set(echo = TRUE)  # show R commands
+```
+<div style="margin-bottom:30px;">
+
+</div>
+
+</div> 
+
+* 목차
+1) Preprocessing
+2) EDA
+3) Classification Modling
+
+<br>
+
+# 작업 환경 구축
+```{r}
+setwd("C:/r/Reuters")
+category <- read.csv('categories.csv')
+dtmreut <- read.csv('dtmreut.csv',header = T)
+txtreut <- read.csv('txtreut.csv')
+
+library(tm)
+library(stopwords)
+library(textstem)
+library(dplyr)
+library(tidytext)
+library(wordcloud)
+library(proxy)
+library(corrplot)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(e1071)
+library(class)
+library(tidyverse)
+library(randomForest)
+library(xgboost)
+
+set.seed(32152339)
+```
+<br>
+<br>
+
+# 1)Preprocessing
+
+```{r}
+sum(is.na(txtreut))#결측값이 없는 것을 확인할 수 있다.
+dim(unique(txtreut))==dim(txtreut) #중복행이 없는 것을 확인할 수 있다.
+
+summary(txtreut)
+
+#소문자화
+txtreut$x<-sapply(txtreut$x,tolower) 
+
+#숫자제거 
+for (i in 1:nrow(txtreut)){
+  txtreut$x[i]<-gsub(txtreut$x[i],pattern = "\\d+",replacement = "") 
+}
+
+#특수문자 제거
+txtreut$x<-sapply(txtreut$x,removePunctuation) 
+
+#토크나이징
+tokenizer <- function(x)
+  unlist(strsplit(as.character(x), " "))
+txtreut$x_tk<-sapply(txtreut$x, tokenizer) 
+
+#불용어 제거
+for (i in 1:nrow(txtreut)){
+  txtreut$x_tk[i]<-list(txtreut$x_tk[i][[1]][! txtreut$x_tk[i][[1]] %in% c(stopwords(),"")])
+}
+
+#어근으로 변환
+for (i in 1:nrow(txtreut)){
+  txtreut$x_tk[i]<-list(lemmatize_strings(txtreut$x_tk[i][[1]]))
+}
+
+#라벨 조인 
+txtreut<-left_join(txtreut,category,by='X')
+
+head(txtreut,3)
+```
+</div>
+* txtreut 결측값, 중복값 확인  
+* 소문자로 변환  
+* 숫자 제거  
+* puntuation 제거  
+* Tokenizing  
+* stopwords 제거  
+* lemmatization  
+* label과 join  
+=> 이러한 전처리를 통해서 dtm을 생성했다고 가정하고, 이 이후 dtm은 제공된 dtmreut을 사용한다.
+</div>
+<br>
+<br>
+
+# 2) EDA
+
+```{r}
+dtmreut<-left_join(dtmreut,category,by='X')
+
+#클래스별 빈도 확인
+table(dtmreut$category)
+barplot(table(dtmreut$category),col = brewer.pal(8, "Dark2"))
+
+#클래스별
+acq<-dtmreut %>% filter(category=="acq") %>% select(-category)
+coffee<-dtmreut %>% filter(category=="coffee") %>% select(-category)
+crude<-dtmreut %>% filter(category=="crude") %>% select(-category)
+earn<-dtmreut %>% filter(category=="earn") %>% select(-category)
+interest<-dtmreut %>% filter(category=="interest") %>% select(-category)
+money.fx<-dtmreut %>% filter(category=="money.fx") %>% select(-category)
+ship<-dtmreut %>% filter(category=="ship") %>% select(-category)
+sugar<-dtmreut %>% filter(category=="sugar") %>% select(-category)
+trade<-dtmreut %>% filter(category=="trade") %>% select(-category)
+
+#클래스별 열별 합 데이터 생성
+acq_cnt<-colSums(acq%>%select(-X))
+coffee_cnt<-colSums(coffee%>%select(-X))
+crude_cnt<-colSums(crude%>%select(-X))
+earn_cnt<-colSums(earn%>%select(-X))
+interest_cnt<-colSums(interest%>%select(-X))
+money.fx_cnt<-colSums(money.fx%>%select(-X))
+ship_cnt<-colSums(ship%>%select(-X))
+sugar_cnt<-colSums(sugar%>%select(-X))
+trade_cnt<-colSums(trade%>%select(-X))
+
+#클래스별 고빈도 단어 확인.
+head(sort(acq_cnt,decreasing = T))
+head(sort(coffee_cnt,decreasing = T))
+head(sort(crude_cnt,decreasing = T))
+head(sort(earn_cnt,decreasing = T))
+head(sort(interest_cnt,decreasing = T))
+head(sort(money.fx_cnt,decreasing = T))
+head(sort(ship_cnt,decreasing = T))
+head(sort(sugar_cnt,decreasing = T))
+head(sort(trade_cnt,decreasing = T))
+
+```
+<!--- 끝 --->  
+</div>
+* earn 클래스가 가장 고빈도로 관찰됨.
+* raw DTM을 클래스 별로 분리함.
+* 추후 EDA에 활용하기 위해 클래스별로 분리한 DTM을 열별로 합함. 
+* 클래스별 고빈도 단어 확인.
+</div>
+
+```{r}
+#감성분석 기반 워드클라우드
+bingsent <- get_sentiments("bing")
+bingpos <- bingsent[bingsent$sentiment=='positive',]
+bingneg <- bingsent[bingsent$sentiment=='negative',]
+
+#사용자 함수 정의
+sent_wc<-function(x){
+  wordcolor <- rep("grey",length(x))
+  wordcolor[names(x) %in% bingpos$word] = "blue"
+  wordcolor[names(x) %in% bingneg$word] = "red"
+  wordcloud(names(x),x,max.words = 100,colors = wordcolor,random.order = F,ordered.colors = T)
+}
+
+#클래스별 감성분석 워드클라우드
+sent_wc(acq_cnt)
+sent_wc(coffee_cnt)
+sent_wc(crude_cnt)
+sent_wc(earn_cnt)
+sent_wc(interest_cnt)
+sent_wc(money.fx_cnt)
+sent_wc(ship_cnt)
+sent_wc(sugar_cnt)
+sent_wc(trade_cnt)
+```
+</div>
+* 긍정단어와 부정단어를 객체에 저장.  
+* 감성분석 기반 워드클라우드를 위한 시각화 함수를 직접 정의함. 
+* 클래스별 고빈도 단어 확인.
+* 클래스별 감성분석 결과, 긍정단어와 부정단어가 비슷한 비율로 섞여있음.
+</div>
+
+```{r}
+#다중 클래스 워드클라우드 
+
+#모든 클래스를 합한 데이터셋 생성
+mat<-cbind(as.matrix(acq_cnt),as.matrix(coffee_cnt),as.matrix(crude_cnt),
+           as.matrix(earn_cnt),as.matrix(interest_cnt),as.matrix(money.fx_cnt),
+           as.matrix(ship_cnt),as.matrix(sugar_cnt),as.matrix(trade_cnt))
+colnames(mat)<-names(table(dtmreut$category))
+
+
+#다중클래스 집계 데이터의 단어별 min, max, mean 을 기준으로 워드클라우드 시각화
+commonality.cloud(mat,min,200,random.order=F,colors = brewer.pal(8, "Dark2")) #단어의 최소값을 기준으로 시각화
+commonality.cloud(mat,max,200,random.order=F,colors = brewer.pal(8, "Dark2")) #단어의 최대값을 기준으로 시각화
+commonality.cloud(mat,mean,200,random.order=F,colors = brewer.pal(8, "Dark2"))#단어의 평균값을 기준으로 시각화
+
+#비교 워드클라우드 시각화
+comparison.cloud(mat,max.words = 300,colors = brewer.pal(9, "Set1"),random.order = F,title.size=1.5)
+```
+</div>
+* 모든 클래스를 비교하기 위한 워드클라우드를 하기 위해 모든 클래스를 한 데이터셋 내에 합함.
+* 단어별 최소값을 기준으로 워드클라우드를 한 결과, say가 압도적으로 크게 관찰되며 year, pct 등이 그 뒤를 이음.
+* 단어별 최대값을 기준으로 워드클라우드를 한 결과, vs가 가장 고빈도로 관찰되며 say, billion, mln 등이 그 뒤를 이음.  
+* 단어별 평균값을 기준으로 워드클라우드를 한 결과, say가 가장 크게 관찰되며 mln, dlrs 등이 그 뒤를 이음.
+* 모든 클래스별를 한 워드클라우드 안에 비교 분석하기 위하여, 각각의 색으로 표현한 wordcloud로 나타내었고, VS가 모든 클래스의 단어들 중 가장 고빈도로 예상됨.
+</div>
+
+```{r}
+#클래스별 코사인 유사도
+cossim<-function(x,y){
+  sum(x*y)/(sqrt(sum(x*x))*sqrt(sum(y*y)))
+}
+cossim(acq_cnt,coffee_cnt)
+
+mat_dtm<-1-as.matrix(dist(t(mat), method = "cosine"))
+mat_dtm
+corrplot(mat_dtm,addCoef.col = "white")
+```
+</div>
+* 클래스별 코사인 유사도를 확인하기 위하여 함수를 정의.
+* dist함수의 "cosine" method를 사용하여 모든 클래스끼리 코사인 유사도를 확인.
+* interset와 money.fx가 0.72로 높은 유사도를 보임.
+* 대체로 earn 클래스가 타 변수와 유사도가 없는 것을 확인.
+</div>
+
+```{r}
+#클래스별 DTM을 정의.
+DTM<-t(mat)
+
+# tf-idf 함수 정의
+tfidf <- function(x) {
+  tf <- ifelse(x>0, 1+log(x), 0)
+  df <- colSums(x>0)
+  idf <- log(dim(x)[1]/df)
+  tfidf <- t(t(tf)*idf)
+  tfidf
+}
+
+# tf-idf 적용
+class_tfidf_DTM<-tfidf(DTM)
+
+# 의미없는 단어를 추출
+remove_word_list<-names(colSums(class_tfidf_DTM)[colSums(class_tfidf_DTM)==0]) 
+length(remove_word_list)
+remove_word_list
+```
+</div>
+* tf-idf를 클래스별 DTM에 적용.
+* tf-idf 가중치가 0인 단어를 저장하고 추후 분석에 활용.
+</div>
+
+```{r}
+
+#class별로 집계한 데이터셋 클러스터링
+plot(hclust(dist(DTM)))
+
+#class별로 집계한 데이터셋 코사인 유사도 기반 클러스터링
+plot(hclust(dist(t(mat), method = "cosine")))
+
+ #class별 tfidf 데이터셋 클러스터링
+plot(hclust(dist(class_tfidf_DTM)))
+```
+</div>
+* euclidean distance 기반 계층적 군집분석
+* 전체적으로 earn class가 가장 cluster가 나중에 됨을 볼 수 있음.
+* 코사인 유사도의 결과와 마찬가지로 earn class가 타 class와 제일 잘 구분된다는 의미로 해석됨.
+</div>
+
+<br>
+<br>
+
+# 3) Classification Modeling
+
+```{r}
+options(scipen=100);#자연상수 출력방지
+
+all_DTM<- dtmreut %>% select(-c(X))
+removed_DTM<-dtmreut[, !(names(dtmreut) %in% c(remove_word_list,'X'))]
+tfidf_DTM<-cbind(as.data.frame(tfidf(as.matrix(dtmreut %>% select(-c(X,category))))),category=category$category)
+
+dim(all_DTM)
+dim(removed_DTM)
+dim(tfidf_DTM)
+```
+</div>
+* 비교분석하기 위해 3가지 데이터셋 생성
+* all_DTM : 원 데이터셋
+* removed_DTM : 클래스별 DTM에서 추출한 필요없는 단어를 제거한 DTM
+* tfidf_DTM : 원 DTM에 tfidf 적용
+</div>
+
+<br>
+
+### decision tree
+```{r}
+ctrl<-rpart.control(minsplit = 5,cp=0.0001,xval=5) #각 노드에 5개 이상 있으면 분할하기
+fit_tree<-rpart(category~.,data=all_DTM,method='class',control=ctrl)
+prp(fit_tree,cex = .5,box.palette = "auto", roundint=FALSE)
+plotcp(fit_tree)#그림상 cp를 0.001로 제한하여 가지치기를 하면 될것으로 보임
+printcp(fit_tree) #각 분할별 cp값 출력
+pruned<-prune(fit_tree,cp=0.001) #cp를 0.01로 가지치기
+prp(pruned,cex=.7,box.palette =0, roundint=FALSE)
+```
+</div>
+* minsplit을 5로 설정함으로써 노드당 최소데이터 수를 5로 함.
+* 가지치기를 하기 위하여 복잡도(cp)를 초기에 0.0001로 설정.
+* xval을 5로 설정함으로써 5 fold cross validation 설정.
+* 복잡도그림을 통해 찾은 복잡도(0.001)로 가지치기
+</div>
+
+```{r}
+#tfidf dtm
+ctrl<-rpart.control(minsplit = 5,cp=0.0001,xval=5)
+fit_tree<-rpart(category~.,data=tfidf_DTM,method='class',control=ctrl)
+prp(fit_tree,cex = .5,box.palette = 0, roundint=FALSE)
+plotcp(fit_tree)#변수를 제거한 DTM역시 그림상 cp를 0.001로 제한하여 가지치기를 하면 될것으로 보임
+printcp(fit_tree) #자연상수 출력 방지 및 각 분할별 cp값 출력
+pruned<-prune(fit_tree,cp=0.001)
+prp(pruned,cex=.7,box.palette =0, roundint=FALSE)
+```
+</div>
+* all_DTM과 같은 방법으로 의사결정나무를 훈련하고 최적의 CP를 구함.
+
+</div>
+
+```{r}
+#removed dtm
+ctrl<-rpart.control(minsplit = 5,cp=0.0001,xval=5)
+fit_tree<-rpart(category~.,data=removed_DTM,method='class',control=ctrl)
+prp(fit_tree,cex = .5,box.palette = 0, roundint=FALSE)
+plotcp(fit_tree)#변수를 제거한 DTM역시 그림상 cp를 0.001로 제한하여 가지치기를 하면 될것으로 보임
+printcp(fit_tree) #자연상수 출력 방지 및 각 분할별 cp값 출력
+pruned<-prune(fit_tree,cp=0.001)
+prp(pruned,cex=.7,box.palette =0, roundint=FALSE)
+```
+</div>
+* all_DTM과 같은 방법으로 의사결정나무를 훈련하고 최적의 CP를 구함.
+</div>
+
+```{r}
+#의사결정나무의 복잡도 그래프를 출력하는 함수 정의
+dt_cp_plot<-function(dtm){
+  ctrl<-rpart.control(minsplit = 5,cp=0.0001,xval=5)
+  fit_tree<-rpart(category~.,data=dtm,method='class',control=ctrl)
+  #prp(fit_tree,cex = .5,box.palette = "auto", roundint=FALSE)
+  plotcp(fit_tree)#그림상 cp를 0.001로 제한하여 가지치기를 하면 될것으로 보임
+}
+
+dt_cp_plot(all_DTM) #0.001에서 가지치기 적용하면 좋을 것 같음
+dt_cp_plot(removed_DTM) #0.001에서 가지치기 적용하면 좋을 것 같음
+dt_cp_plot(tfidf_DTM) #0.001에서 가지치기 적용하면 좋을 것 같음
+
+```
+</div>
+* 의사결정나무의 복잡도 그래프를 출력하는함수를 정의하여 추후 가지치기에 활용.
+* 세 데이터셋 모두 CP가 0.001이 적절할 것 처럼 보임. 
+</div>
+
+```{r}
+#k-fold 교차검증 의사결정나무 함수 정의 
+dt_cv<-function(dtm,cp=0.001,k=5){
+  cv_index<-createFolds(dtm$category,k=k)
+  acc<-c()
+  for (i in 1:k){
+    ctrl<-rpart.control(minsplit = 5,cp=cp,xval=5)
+    fit_tree<-rpart(category~.,data=dtm[unlist(cv_index[-i]),],control=ctrl)
+    pred <- predict(fit_tree, subset(dtm[unlist(cv_index[i]),],select = -category), type = 'class')
+    acc[i] <- confusionMatrix(as.factor(as.character(pred)),as.factor(category[unlist(cv_index[i]),]$category))[[3]][1]
+  } 
+  mean(acc)
+}
+
+#(all_DTM, removed_DTM, tfidf_DTM) 데이터셋별 정확도 확인
+dt_cv(all_DTM,cp=0.001) #dt_cp_plot을 통해 정한 cp 적용
+dt_cv(removed_DTM,cp=0.001) #dt_cp_plot을 통해 정한 cp 적용 
+dt_cv(tfidf_DTM,cp=0.001) #dt_cp_plot을 통해 정한 cp 적용
+```
+</div>
+* K-fold를 활용한 의사결정나무를 훈련시키기위해 함수를 정의함.
+* (all_DTM, removed_DTM, tfidf_DTM) 데이터셋별 정확도 확인
+* all_DTM ≒ tfidf_DTM > removed_DTM
+* 따라서 이후 Classification modeling에선 all_dtm을 사용.
+</div>
+
+<br>
+### knn
+```{r}
+#knn
+knn_k_search<-function(dtm,k_v){
+  cv_index<-createFolds(dtm$category,k=4)
+  train_x<-dtm[unlist(cv_index[-1]),]%>%select(-category)
+  train_y<-dtm[unlist(cv_index[-1]),]%>%select(category)
+  valid_x<-dtm[unlist(cv_index[1]),]%>%select(-category)
+  valid_y<-dtm[unlist(cv_index[1]),]%>%select(category)
+  k<-c()
+  acc<-c()
+  for (i in k_v){
+    pred<-knn(train_x, valid_x, train_y[,1],k=i)
+    k<-c(k,i)
+    acc<-c(acc,(confusionMatrix(pred,valid_y[,1])[[3]][1]))}
+  df_acc<-data.frame(k=k,acc=acc)
+  plot(df_acc,type="b")
+}
+
+knn_k_search(all_DTM,c(1,3,5))
+
+
+#knn cross-validation
+knn_cv<-function(dtm,k=1,n=5){
+  cv_index<-createFolds(dtm$category,k=n)
+  knn_pred<<-rep(0,nrow(dtm))
+  for (i in 1:n){
+    train_x<-dtm[unlist(cv_index[-i]),]%>%select(-category)
+    train_y<-dtm[unlist(cv_index[-i]),]%>%select(category)
+    valid_x<-dtm[unlist(cv_index[i]),]%>%select(-category)
+    valid_y<-dtm[unlist(cv_index[i]),]%>%select(category)
+    pred<-knn(train_x, valid_x, train_y[,1],k=k)
+    knn_pred[unlist(cv_index[i])]<<-as.character(pred)}
+  return(head(knn_pred,50))
+}
+
+knn_cv(all_DTM,k=1,n=5) #k=1이 제일 좋은 성능
+sum(knn_pred==category$category)/nrow(category)
+
+#confusion matrix
+confusionMatrix(as.factor(knn_pred),category$category)
+
+```
+</div>
+* knn을 훈련시키기 위해서 최적의 k를 찾는 함수 생성.
+* n-fold cross validation knn 함수 생성.
+* 최적의 k는 1임을 알 수 있음.
+* k=1로 5fold cross validation 적용.
+</div>
+
+<br>
+
+### Randomforest
+```{r}
+cv_rf<-function(dtm,ntree=100,n=5){
+    rf_pred<<-rep(9,length(category$category))
+    cv_index<-createFolds(dtm$category,k=n)
+    for (i in 1:n){
+      train<-dtm[unlist(cv_index[-i]),]
+      valid_x<-dtm[unlist(cv_index[i]),]%>%select(-category)
+      valid_y<-dtm[unlist(cv_index[i]),]%>%select(category)
+      
+      rf<-randomForest(category~.,train,ntree=ntree)
+      pred<-predict(rf, valid_x)
+      rf_pred[unlist(cv_index[i])]<<-as.character(pred) }
+    return(head(rf_pred,50))
+}
+
+cv_rf(all_DTM,500,5)
+
+#성능 확인
+sum(rf_pred==as.character(category$category))/nrow(category)
+
+#confusion matrix
+confusionMatrix(as.factor(rf_pred),category$category)
+```
+</div>
+* k-fold cross validation randomforest 함수 생성
+* 500개의 decision tree를 생성하여 bagging
+* 5-fold cross validation
+* 상당히 좋은 성능
+</div>
+
+<br>
+
+### NaiveBayes
+```{r}
+nb_cv<-function(dtm,n=5){
+  cv_index<-createFolds(dtm$category,k=n)
+  nb_pred<<-rep(0,nrow(dtm))
+  cat_DTM<-as.data.frame(lapply(X = dtm%>%select(-category),FUN = as.factor))
+  for (i in 1:n){
+    train_x<-cat_DTM[unlist(cv_index[-i]),]
+    train_y<-category[unlist(cv_index[-i]),]$category
+    valid_x<-cat_DTM[unlist(cv_index[i]),]
+    valid_y<-category[unlist(cv_index[i]),]$category
+    nb <- naiveBayes(train_x,  train_y)
+    pred<-predict(nb,valid_x)
+    nb_pred[unlist(cv_index[i])]<<-as.character(pred)}
+  return(head(nb_pred,50))
+}
+
+nb_cv(all_DTM,5)
+
+#성능 확인
+sum(nb_pred==category$category)/nrow(category)
+
+#confusion matrix
+confusionMatrix(as.factor(nb_pred),category$category)
+```
+</div>
+* 나이브 베이즈는 범주형 변수를 취급하기때문에 모든 단어를 범주형으로 변환
+* cross validation naive bayes 함수 정의
+* 저조한 성능 
+</div>
+
+<br>
+
+### Ensemble - stacking (meta learner : XGBoost)
+```{r}
+stk_df<-data.frame(knn_pred=knn_pred,
+                   rf_pred=rf_pred,
+                   nb_pred=nb_pred,
+                   y=category$category) %>% data.matrix
+
+xgb<-xgb.cv(data = stk_df[,c(1,2,3)], label = stk_df[,4]-1, num_class=9, nfold=5,
+            nrounds = 100, early_stopping_rounds = 10, objective = "multi:softprob",
+            eval_metric = 'merror', verbose = 10, prediction = T)
+
+#최종 classification accuracy
+1-xgb$evaluation_log$test_merror_mean[xgb$best_iteration]
+
+```
+</div>
+* 성능 향상을 위해 지금까지 학습한 모델들을 ensemble(stacking)
+* knn, randomforest, naivebayes의 결과값을 종합해 XGBoost로 예측
+* stacking으로 인해 최고 성능 기록
+* 최종모델
+</div>
+
+
+<div style="margin-bottom:30px;">
+
